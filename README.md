@@ -10,7 +10,7 @@ Install and run iPhone apps without using Xcode. Designed to work on unjailbroke
 ## Usage
 
 * Install an application bundle, mount the developer disk image, and run it
-* `apple.py -b/--bundle <app>  -i  -r -a <args>`
+* `apple.py -b/--bundle <app>  -i  -m -r -a <args>`
 
 ## Notes
 
