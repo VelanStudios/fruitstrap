@@ -51,10 +51,10 @@ Made possible by:
 """
 
 import argparse
+import binascii
 import ctypes
-import ctypes.macholib.dyld
-import ctypes.util
 import os
+from pathlib import Path
 import plistlib
 import socket
 import subprocess
@@ -65,8 +65,7 @@ import time
 # CoreFoundation.framework
 
 if sys.platform == 'win32':
-    os.environ['PATH'] += os.pathsep + os.path.join(os.environ['CommonProgramFiles'], 'Apple', 'Apple Application Support')
-    CoreFoundation = ctypes.CDLL('CoreFoundation.dll')
+    CoreFoundation = ctypes.CDLL(os.path.join(os.environ['CommonProgramFiles'], 'Apple', 'Mobile Device Support','CoreFoundation.dll'))
 else:
     CoreFoundation = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
 
@@ -184,7 +183,7 @@ CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c
 CFStringCreateWithCString.restype = CFStringRef
 
 def CFStr(value):
-    return CFStringCreateWithCString(None, value, kCFStringEncodingUTF8)
+    return CFStringCreateWithCString(None, value.encode('utf-8'), kCFStringEncodingUTF8)
 
 CFStringGetCStringPtr = CoreFoundation.CFStringGetCStringPtr
 CFStringGetCStringPtr.argtypes = [CFStringRef, ctypes.c_uint]
@@ -203,11 +202,9 @@ def CFStringGetStr(cfstr):
         if not result:
             length = CFStringGetLength(cfstr) * 2 + 1
             stringBuffer = ctypes.create_string_buffer(length)
-            if CFStringGetCString(cfstr, stringBuffer, length, kCFStringEncodingUTF8):
-                result = stringBuffer.value
-            else:
-                raise RuntimeError('Failed to convert string.')
-    return result
+            CFStringGetCString(cfstr, stringBuffer, length, kCFStringEncodingUTF8)
+            result = stringBuffer.value
+    return result.decode("utf8")
 
 def CFDictionaryToDict(dictionary):
     count = CFDictionaryGetCount(dictionary)
@@ -216,7 +213,7 @@ def CFDictionaryToDict(dictionary):
     CFDictionaryGetKeysAndValues(dictionary, keys, values)
     keys = [CFToPython(key) for key in keys]
     values = [CFToPython(value) for value in values]
-    return dict(zip(keys, values))
+    return dict(list(zip(keys, values)))
 
 def CFToPython(dataRef):
     typeId = CFGetTypeID(dataRef)
@@ -231,8 +228,7 @@ def CFToPython(dataRef):
 # MobileDevice.Framework
 
 if sys.platform == 'win32':
-    os.environ['PATH'] += os.pathsep + os.path.join(os.environ['CommonProgramFiles'], 'Apple', 'Mobile Device Support')
-    MobileDevice = ctypes.CDLL('MobileDevice.dll')
+    MobileDevice = ctypes.CDLL(os.path.join(os.environ['CommonProgramFiles'], 'Apple', 'Mobile Device Support','MobileDevice.dll'))
 else:
     MobileDevice = ctypes.CDLL('/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice')
 
@@ -336,6 +332,26 @@ AMDeviceStartHouseArrestService = MobileDevice.AMDeviceStartHouseArrestService
 AMDeviceStartHouseArrestService.argtypes = [am_device_p, CFStringRef, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_void_p]
 AMDeviceStartHouseArrestService.restype = ctypes.c_uint
 
+AMDeviceSecureStartService = MobileDevice.AMDeviceSecureStartService
+AMDeviceSecureStartService.argtypes = [am_device_p, CFStringRef, CFDictionaryRef, ctypes.POINTER(ctypes.c_void_p)]
+AMDeviceSecureStartService.restype = ctypes.c_uint
+
+AMDServiceConnectionGetSocket = MobileDevice.AMDServiceConnectionGetSocket
+AMDServiceConnectionGetSocket.argtypes = [ctypes.c_void_p]
+AMDServiceConnectionGetSocket.restype = ctypes.c_uint
+
+AMDServiceConnectionInvalidate = MobileDevice.AMDServiceConnectionInvalidate
+AMDServiceConnectionInvalidate.argtypes = [ctypes.c_void_p]
+AMDServiceConnectionInvalidate.restype = None
+
+AMDServiceConnectionSend = MobileDevice.AMDServiceConnectionSend
+AMDServiceConnectionSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+AMDServiceConnectionSend.restype = ctypes.c_int32
+
+AMDServiceConnectionReceive = MobileDevice.AMDServiceConnectionReceive
+AMDServiceConnectionSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+AMDServiceConnectionSend.restype = ctypes.c_int32
+
 am_device_install_application_callback = ctypes.CFUNCTYPE(ctypes.c_uint, CFDictionaryRef, ctypes.c_void_p)
 
 AMDeviceTransferApplication = MobileDevice.AMDeviceTransferApplication
@@ -400,6 +416,301 @@ AFCDirectoryRead.restype = ctypes.c_uint
 AFCDirectoryClose = MobileDevice.AFCDirectoryClose
 AFCDirectoryClose.argtypes = [AFCConnectionRef, AFCDirectoryRef]
 AFCDirectoryClose.restype = ctypes.c_uint
+
+def _get_mobile_device_error(error_code):
+    # Sourced this list from https://github.com/ios-control/ios-deploy
+    _error_code_to_message = {
+        0x00000000: "kAMDSuccess",
+        0xe8000001: "kAMDUndefinedError",
+        0xe8000002: "kAMDBadHeaderError",
+        0xe8000003: "kAMDNoResourcesError",
+        0xe8000004: "kAMDReadError",
+        0xe8000005: "kAMDWriteError",
+        0xe8000006: "kAMDUnknownPacketError",
+        0xe8000007: "kAMDInvalidArgumentError",
+        0xe8000008: "kAMDNotFoundError",
+        0xe8000009: "kAMDIsDirectoryError",
+        0xe800000a: "kAMDPermissionError",
+        0xe800000b: "kAMDNotConnectedError",
+        0xe800000c: "kAMDTimeOutError",
+        0xe800000d: "kAMDOverrunError",
+        0xe800000e: "kAMDEOFError",
+        0xe800000f: "kAMDUnsupportedError",
+        0xe8000010: "kAMDFileExistsError",
+        0xe8000011: "kAMDBusyError",
+        0xe8000012: "kAMDCryptoError",
+        0xe8000013: "kAMDInvalidResponseError",
+        0xe8000014: "kAMDMissingKeyError",
+        0xe8000015: "kAMDMissingValueError",
+        0xe8000016: "kAMDGetProhibitedError",
+        0xe8000017: "kAMDSetProhibitedError",
+        0xe8000018: "kAMDRemoveProhibitedError",
+        0xe8000019: "kAMDImmutableValueError",
+        0xe800001a: "kAMDPasswordProtectedError",
+        0xe800001b: "kAMDMissingHostIDError",
+        0xe800001c: "kAMDInvalidHostIDError",
+        0xe800001d: "kAMDSessionActiveError",
+        0xe800001e: "kAMDSessionInactiveError",
+        0xe800001f: "kAMDMissingSessionIDError",
+        0xe8000020: "kAMDInvalidSessionIDError",
+        0xe8000021: "kAMDMissingServiceError",
+        0xe8000022: "kAMDInvalidServiceError",
+        0xe8000023: "kAMDInvalidCheckinError",
+        0xe8000024: "kAMDCheckinTimeoutError",
+        0xe8000025: "kAMDMissingPairRecordError",
+        0xe8000026: "kAMDInvalidActivationRecordError",
+        0xe8000027: "kAMDMissingActivationRecordError",
+        0xe8000028: "kAMDWrongDroidError",
+        0xe8000029: "kAMDSUVerificationError",
+        0xe800002a: "kAMDSUPatchError",
+        0xe800002b: "kAMDSUFirmwareError",
+        0xe800002c: "kAMDProvisioningProfileNotValid",
+        0xe800002d: "kAMDSendMessageError",
+        0xe800002e: "kAMDReceiveMessageError",
+        0xe800002f: "kAMDMissingOptionsError",
+        0xe8000030: "kAMDMissingImageTypeError",
+        0xe8000031: "kAMDDigestFailedError",
+        0xe8000032: "kAMDStartServiceError",
+        0xe8000033: "kAMDInvalidDiskImageError",
+        0xe8000034: "kAMDMissingDigestError",
+        0xe8000035: "kAMDMuxError",
+        0xe8000036: "kAMDApplicationAlreadyInstalledError",
+        0xe8000037: "kAMDApplicationMoveFailedError",
+        0xe8000038: "kAMDApplicationSINFCaptureFailedError",
+        0xe8000039: "kAMDApplicationSandboxFailedError",
+        0xe800003a: "kAMDApplicationVerificationFailedError",
+        0xe800003b: "kAMDArchiveDestructionFailedError",
+        0xe800003c: "kAMDBundleVerificationFailedError",
+        0xe800003d: "kAMDCarrierBundleCopyFailedError",
+        0xe800003e: "kAMDCarrierBundleDirectoryCreationFailedError",
+        0xe800003f: "kAMDCarrierBundleMissingSupportedSIMsError",
+        0xe8000040: "kAMDCommCenterNotificationFailedError",
+        0xe8000041: "kAMDContainerCreationFailedError",
+        0xe8000042: "kAMDContainerP0wnFailedError",
+        0xe8000043: "kAMDContainerRemovalFailedError",
+        0xe8000044: "kAMDEmbeddedProfileInstallFailedError",
+        0xe8000045: "kAMDErrorError",
+        0xe8000046: "kAMDExecutableTwiddleFailedError",
+        0xe8000047: "kAMDExistenceCheckFailedError",
+        0xe8000048: "kAMDInstallMapUpdateFailedError",
+        0xe8000049: "kAMDManifestCaptureFailedError",
+        0xe800004a: "kAMDMapGenerationFailedError",
+        0xe800004b: "kAMDMissingBundleExecutableError",
+        0xe800004c: "kAMDMissingBundleIdentifierError",
+        0xe800004d: "kAMDMissingBundlePathError",
+        0xe800004e: "kAMDMissingContainerError",
+        0xe800004f: "kAMDNotificationFailedError",
+        0xe8000050: "kAMDPackageExtractionFailedError",
+        0xe8000051: "kAMDPackageInspectionFailedError",
+        0xe8000052: "kAMDPackageMoveFailedError",
+        0xe8000053: "kAMDPathConversionFailedError",
+        0xe8000054: "kAMDRestoreContainerFailedError",
+        0xe8000055: "kAMDSeatbeltProfileRemovalFailedError",
+        0xe8000056: "kAMDStageCreationFailedError",
+        0xe8000057: "kAMDSymlinkFailedError",
+        0xe8000058: "kAMDiTunesArtworkCaptureFailedError",
+        0xe8000059: "kAMDiTunesMetadataCaptureFailedError",
+        0xe800005a: "kAMDAlreadyArchivedError",
+        0xe800005b: "kAMDServiceLimitError",
+        0xe800005c: "kAMDInvalidPairRecordError",
+        0xe800005d: "kAMDServiceProhibitedError",
+        0xe800005e: "kAMDCheckinSetupFailedError",
+        0xe800005f: "kAMDCheckinConnectionFailedError",
+        0xe8000060: "kAMDCheckinReceiveFailedError",
+        0xe8000061: "kAMDCheckinResponseFailedError",
+        0xe8000062: "kAMDCheckinSendFailedError",
+        0xe8000063: "kAMDMuxCreateListenerError",
+        0xe8000064: "kAMDMuxGetListenerError",
+        0xe8000065: "kAMDMuxConnectError",
+        0xe8000066: "kAMDUnknownCommandError",
+        0xe8000067: "kAMDAPIInternalError",
+        0xe8000068: "kAMDSavePairRecordFailedError",
+        0xe8000069: "kAMDCheckinOutOfMemoryError",
+        0xe800006a: "kAMDDeviceTooNewError",
+        0xe800006b: "kAMDDeviceRefNoGood",
+        0xe800006c: "kAMDCannotTranslateError",
+        0xe800006d: "kAMDMobileImageMounterMissingImageSignature",
+        0xe800006e: "kAMDMobileImageMounterResponseCreationFailed",
+        0xe800006f: "kAMDMobileImageMounterMissingImageType",
+        0xe8000070: "kAMDMobileImageMounterMissingImagePath",
+        0xe8000071: "kAMDMobileImageMounterImageMapLoadFailed",
+        0xe8000072: "kAMDMobileImageMounterAlreadyMounted",
+        0xe8000073: "kAMDMobileImageMounterImageMoveFailed",
+        0xe8000074: "kAMDMobileImageMounterMountPathMissing",
+        0xe8000075: "kAMDMobileImageMounterMountPathNotEmpty",
+        0xe8000076: "kAMDMobileImageMounterImageMountFailed",
+        0xe8000077: "kAMDMobileImageMounterTrustCacheLoadFailed",
+        0xe8000078: "kAMDMobileImageMounterDigestFailed",
+        0xe8000079: "kAMDMobileImageMounterDigestCreationFailed",
+        0xe800007a: "kAMDMobileImageMounterImageVerificationFailed",
+        0xe800007b: "kAMDMobileImageMounterImageInfoCreationFailed",
+        0xe800007c: "kAMDMobileImageMounterImageMapStoreFailed",
+        0xe800007d: "kAMDBonjourSetupError",
+        0xe800007e: "kAMDDeviceOSVersionTooLow",
+        0xe800007f: "kAMDNoWifiSyncSupportError",
+        0xe8000080: "kAMDDeviceFamilyNotSupported",
+        0xe8000081: "kAMDEscrowLockedError",
+        0xe8000082: "kAMDPairingProhibitedError",
+        0xe8000083: "kAMDProhibitedBySupervision",
+        0xe8000084: "kAMDDeviceDisconnectedError",
+        0xe8000085: "kAMDTooBigError",
+        0xe8000086: "kAMDPackagePatchFailedError",
+        0xe8000087: "kAMDIncorrectArchitectureError",
+        0xe8000088: "kAMDPluginCopyFailedError",
+        0xe8000089: "kAMDBreadcrumbFailedError",
+        0xe800008a: "kAMDBreadcrumbUnlockError",
+        0xe800008b: "kAMDGeoJSONCaptureFailedError",
+        0xe800008c: "kAMDNewsstandArtworkCaptureFailedError",
+        0xe800008d: "kAMDMissingCommandError",
+        0xe800008e: "kAMDNotEntitledError",
+        0xe800008f: "kAMDMissingPackagePathError",
+        0xe8000090: "kAMDMissingContainerPathError",
+        0xe8000091: "kAMDMissingApplicationIdentifierError",
+        0xe8000092: "kAMDMissingAttributeValueError",
+        0xe8000093: "kAMDLookupFailedError",
+        0xe8000094: "kAMDDictCreationFailedError",
+        0xe8000095: "kAMDUserDeniedPairingError",
+        0xe8000096: "kAMDPairingDialogResponsePendingError",
+        0xe8000097: "kAMDInstallProhibitedError",
+        0xe8000098: "kAMDUninstallProhibitedError",
+        0xe8000099: "kAMDFMiPProtectedError",
+        0xe800009a: "kAMDMCProtected",
+        0xe800009b: "kAMDMCChallengeRequired",
+        0xe800009c: "kAMDMissingBundleVersionError",
+        0xe800009d: "kAMDAppBlacklistedError",
+        0xe800009e: "This app contains an app extension with an illegal bundle identifier. App extension bundle identifiers must have a prefix consisting of their containing application's bundle identifier followed by a '.'.",
+        0xe800009f: "If an app extension defines the XPCService key in its Info.plist, it must have a dictionary value.",
+        0xe80000a0: "App extensions must define the NSExtension key with a dictionary value in their Info.plist.",
+        0xe80000a1: "If an app extension defines the CFBundlePackageType key in its Info.plist, it must have the value \"XPC!\".",
+        0xe80000a2: "App extensions must define either NSExtensionMainStoryboard or NSExtensionPrincipalClass keys in the NSExtension dictionary in their Info.plist.",
+        0xe80000a3: "If an app extension defines the NSExtensionContextClass key in the NSExtension dictionary in its Info.plist, it must have a string value containing one or more characters.",
+        0xe80000a4: "If an app extension defines the NSExtensionContextHostClass key in the NSExtension dictionary in its Info.plist, it must have a string value containing one or more characters.",
+        0xe80000a5: "If an app extension defines the NSExtensionViewControllerHostClass key in the NSExtension dictionary in its Info.plist, it must have a string value containing one or more characters.",
+        0xe80000a6: "This app contains an app extension that does not define the NSExtensionPointIdentifier key in its Info.plist. This key must have a reverse-DNS format string value.",
+        0xe80000a7: "This app contains an app extension that does not define the NSExtensionPointIdentifier key in its Info.plist with a valid reverse-DNS format string value.",
+        0xe80000a8: "If an app extension defines the NSExtensionAttributes key in the NSExtension dictionary in its Info.plist, it must have a dictionary value.",
+        0xe80000a9: "If an app extension defines the NSExtensionPointName key in the NSExtensionAttributes dictionary in the NSExtension dictionary in its Info.plist, it must have a string value containing one or more characters.",
+        0xe80000aa: "If an app extension defines the NSExtensionPointVersion key in the NSExtensionAttributes dictionary in the NSExtension dictionary in its Info.plist, it must have a string value containing one or more characters.",
+        0xe80000ab: "This app or a bundle it contains does not define the CFBundleName key in its Info.plist with a string value containing one or more characters.",
+        0xe80000ac: "This app or a bundle it contains does not define the CFBundleDisplayName key in its Info.plist with a string value containing one or more characters.",
+        0xe80000ad: "This app or a bundle it contains defines the CFBundleShortVersionStringKey key in its Info.plist with a non-string value or a zero-length string value.",
+        0xe80000ae: "This app or a bundle it contains defines the RunLoopType key in the XPCService dictionary in its Info.plist with a non-string value or a zero-length string value.",
+        0xe80000af: "This app or a bundle it contains defines the ServiceType key in the XPCService dictionary in its Info.plist with a non-string value or a zero-length string value.",
+        0xe80000b0: "This application or a bundle it contains has the same bundle identifier as this application or another bundle that it contains. Bundle identifiers must be unique.",
+        0xe80000b1: "This app contains an app extension that specifies an extension point identifier that is not supported on this version of iOS for the value of the NSExtensionPointIdentifier key in its Info.plist.",
+        0xe80000b2: "This app contains multiple app extensions that are file providers. Apps are only allowed to contain at most a single file provider app extension.",
+        0xe80000b3: "kMobileHouseArrestMissingCommand",
+        0xe80000b4: "kMobileHouseArrestUnknownCommand",
+        0xe80000b5: "kMobileHouseArrestMissingIdentifier",
+        0xe80000b6: "kMobileHouseArrestDictionaryFailed",
+        0xe80000b7: "kMobileHouseArrestInstallationLookupFailed",
+        0xe80000b8: "kMobileHouseArrestApplicationLookupFailed",
+        0xe80000b9: "kMobileHouseArrestMissingContainer",
+        # 0xe80000ba does not exist
+        0xe80000bb: "kMobileHouseArrestPathConversionFailed",
+        0xe80000bc: "kMobileHouseArrestPathMissing",
+        0xe80000bd: "kMobileHouseArrestInvalidPath",
+        0xe80000be: "kAMDMismatchedApplicationIdentifierEntitlementError",
+        0xe80000bf: "kAMDInvalidSymlinkError",
+        0xe80000c0: "kAMDNoSpaceError",
+        0xe80000c1: "The WatchKit app extension must have, in its Info.plist's NSExtension dictionary's NSExtensionAttributes dictionary, the key WKAppBundleIdentifier with a value equal to the associated WatchKit app's bundle identifier.",
+        0xe80000c2: "This app is not a valid AppleTV Stub App",
+        0xe80000c3: "kAMDBundleiTunesMetadataVersionMismatchError",
+        0xe80000c4: "kAMDInvalidiTunesMetadataPlistError",
+        0xe80000c5: "kAMDMismatchedBundleIDSigningIdentifierError",
+        0xe80000c6: "This app contains multiple WatchKit app extensions. Only a single WatchKit extension is allowed.",
+        0xe80000c7: "A WatchKit app within this app is not a valid bundle.",
+        0xe80000c8: "kAMDDeviceNotSupportedByThinningError",
+        0xe80000c9: "The UISupportedDevices key in this app's Info.plist does not specify a valid set of supported devices.",
+        0xe80000ca: "This app contains an app extension with an illegal bundle identifier. App extension bundle identifiers must have a prefix consisting of their containing application's bundle identifier followed by a '.', with no further '.' characters after the prefix.",
+        0xe80000cb: "kAMDAppexBundleIDConflictWithOtherIdentifierError",
+        0xe80000cc: "kAMDBundleIDConflictWithOtherIdentifierError",
+        0xe80000cd: "This app contains multiple WatchKit 1.0 apps. Only a single WatchKit 1.0 app is allowed.",
+        0xe80000ce: "This app contains multiple WatchKit 2.0 apps. Only a single WatchKit 2.0 app is allowed.",
+        0xe80000cf: "The WatchKit app has an invalid stub executable.",
+        0xe80000d0: "The WatchKit app has multiple app extensions. Only a single WatchKit extension is allowed in a WatchKit app, and only if this is a WatchKit 2.0 app.",
+        0xe80000d1: "The WatchKit 2.0 app contains non-WatchKit app extensions. Only WatchKit app extensions are allowed in WatchKit apps.",
+        0xe80000d2: "The WatchKit app has one or more embedded frameworks. Frameworks are only allowed in WatchKit app extensions in WatchKit 2.0 apps.",
+        0xe80000d3: "This app contains a WatchKit 1.0 app with app extensions. This is not allowed.",
+        0xe80000d4: "This app contains a WatchKit 2.0 app without an app extension. WatchKit 2.0 apps must contain a WatchKit app extension.",
+        0xe80000d5: "The WatchKit app's Info.plist must have a WKCompanionAppBundleIdentifier key set to the bundle identifier of the companion app.",
+        0xe80000d6: "The WatchKit app's Info.plist contains a non-string key.",
+        0xe80000d7: "The WatchKit app's Info.plist contains a key that is not in the whitelist of allowed keys for a WatchKit app.",
+        0xe80000d8: "The WatchKit 1.0 and a WatchKit 2.0 apps within this app must have have the same bundle identifier.",
+        0xe80000d9: "This app contains a WatchKit app with an invalid bundle identifier. The bundle identifier of a WatchKit app must have a prefix consisting of the companion app's bundle identifier, followed by a '.'.",
+        0xe80000da: "This app contains a WatchKit app where the UIDeviceFamily key in its Info.plist does not specify the value 4 to indicate that it's compatible with the Apple Watch device type.",
+        0xe80000db: "The device is out of storage for apps. Please remove some apps from the device and try again.",
+        0xe80000dc: "This app or an app that it contains has a Siri Intents app extension that is missing the IntentsSupported array in the NSExtensionAttributes dictionary in the NSExtension dictionary in its Info.plist.",
+        0xe80000dd: "This app or an app that it contains has a Siri Intents app extension that does not correctly define the IntentsRestrictedWhileLocked key in the NSExtensionAttributes dictionary in the NSExtension dictionary in its Info.plist. The key's value must be an array of strings.",
+        0xe80000de: "This app or an app that it contains has a Siri Intents app extension that declares values in its IntentsRestrictedWhileLocked key's array value that are not in its IntentsSupported key's array value (in the NSExtensionAttributes dictionary in the NSExtension dictionary in its Info.plist).",
+        0xe80000df: "This app or an app that it contains declares multiple Siri Intents app extensions that declare one or more of the same values in the IntentsSupported array in the NSExtensionAttributes dictionary in the NSExtension dictionary in their Info.plist. IntentsSupported must be distinct among a given Siri Intents extension type within an app.",
+        0xe80000e0: "The WatchKit 2.0 app, which expects to be compatible with watchOS versions earlier than 3.0, contains a non-WatchKit extension in a location that's not compatible with watchOS versions earlier than 3.0.",
+        0xe80000e1: "The WatchKit 2.0 app, which expects to be compatible with watchOS versions earlier than 3.0, contains a framework in a location that's not compatible with watchOS versions earlier than 3.0.",
+        0xe80000e2: "kAMDMobileImageMounterDeviceLocked",
+        0xe80000e3: "kAMDInvalidSINFError",
+        0xe80000e4: "Multiple iMessage app extensions were found in this app. Only one is allowed.",
+        0xe80000e5: "This iMessage application is missing its required iMessage app extension.",
+        0xe80000e6: "This iMessage application contains an app extension type other than an iMessage app extension. iMessage applications may only contain one iMessage app extension and may not contain other types of app extensions.",
+        0xe80000e7: "This app contains a WatchKit app with one or more Siri Intents app extensions that declare IntentsSupported that are not declared in any of the companion app's Siri Intents app extensions. WatchKit Siri Intents extensions' IntentsSupported values must be a subset of the companion app's Siri Intents extensions' IntentsSupported values.",
+        0xe80000e8: "kAMDRequireCUPairingCodeError",
+        0xe80000e9: "kAMDRequireCUPairingBackoffError",
+        0xe80000ea: "kAMDCUPairingError",
+        0xe80000eb: "kAMDCUPairingContinueError",
+        0xe80000ec: "kAMDCUPairingResetError",
+        0xe80000ed: "kAMDRequireCUPairingError",
+        0xe80000ee: "kAMDPasswordRequiredError",
+        # Errors without id->string mapping.
+        0xe8008001: "An unknown error has occurred.",
+        0xe8008002: "Attempted to modify an immutable provisioning profile.",
+        0xe8008003: "This provisioning profile is malformed.",
+        0xe8008004: "This provisioning profile does not have a valid signature (or it has a valid, but untrusted signature).",
+        0xe8008005: "This provisioning profile is malformed.",
+        0xe8008006: "This provisioning profile is malformed.",
+        0xe8008007: "This provisioning profile is malformed.",
+        0xe8008008: "This provisioning profile is malformed.",
+        0xe8008009: "The signature was not valid.",
+        0xe800800a: "Unable to allocate memory.",
+        0xe800800b: "A file operation failed.",
+        0xe800800c: "There was an error communicating with your device.",
+        0xe800800d: "There was an error communicating with your device.",
+        0xe800800e: "This provisioning profile does not have a valid signature (or it has a valid, but untrusted signature).",
+        0xe800800f: "The application's signature is valid but it does not match the expected hash.",
+        0xe8008010: "This provisioning profile is unsupported.",
+        0xe8008011: "This provisioning profile has expired.",
+        0xe8008012: "This provisioning profile cannot be installed on this device.",
+        0xe8008013: "This provisioning profile does not have a valid signature (or it has a valid, but untrusted signature).",
+        0xe8008014: "The executable contains an invalid signature.",
+        0xe8008015: "A valid provisioning profile for this executable was not found.",
+        0xe8008016: "The executable was signed with invalid entitlements.",
+        0xe8008017: "A signed resource has been added, modified, or deleted.",
+        0xe8008018: "The identity used to sign the executable is no longer valid.",
+        0xe8008019: "The application does not have a valid signature.",
+        0xe800801a: "This provisioning profile does not have a valid signature (or it has a valid, but untrusted signature).",
+        0xe800801b: "There was an error communicating with your device.",
+        0xe800801c: "No code signature found.",
+        0xe800801d: "Rejected by policy.",
+        0xe800801e: "The requested profile does not exist (it may have been removed).",
+        0xe800801f: "Attempted to install a Beta profile without the proper entitlement.",
+        0xe8008020: "Attempted to install a Beta profile over lockdown connection.",
+        0xe8008021: "The maximum number of apps for free development profiles has been reached.",
+        0xe8008022: "An error occured while accessing the profile database.",
+        0xe8008023: "An error occured while communicating with the agent.",
+        0xe8008024: "The provisioning profile is banned.",
+        0xe8008025: "The user did not explicitly trust the provisioning profile.",
+        0xe8008026: "The provisioning profile requires online authorization.",
+        0xe8008027: "The cdhash is not in the trust cache.",
+        0xe8008028: "Invalid arguments or option combination.",
+    }
+    return _error_code_to_message.get(error_code, 'Unknown Error')
+
+class MobileDeviceError(Exception):
+    def __init__(self, error_code):
+        self.error_code = error_code
+        self.error_message = _get_mobile_device_error(error_code)
+    def __repr__(self):
+        return '{}: {}'.format(self.error_code, self.error_message)
+    def __str__(self):
+        return '{}: {}'.format(self.error_code, self.error_message)
 
 # ws2_32.dll
 
@@ -467,25 +778,44 @@ if sys.platform == 'win32':
             if e != 0:
                 raise RuntimeError('setsockopt returned %d' % e)
 
-class RawPlistService(object):
-    def __init__(self, service):
-        if sys.platform == 'win32':
-            self._socket = MockSocket(service)
-        else:
-            self._socket = socket.fromfd(service, socket.AF_INET, socket.SOCK_STREAM)
+class SecureService(object):
+    def __init__(self, service_connection):
+        self._service_connection = service_connection
 
-    def close(self):
-        self._socket.close()
+    def sendall(self, data):
+        bytes_sent = AMDServiceConnectionSend(self._service_connection, data, len(data))
+        if bytes_sent != len(data):
+            raise RuntimeError('Sent {} bytes but was expecting to send {}'.format(bytes_sent, len(data)))
 
-    def exchange(self, data):
-        payload = plistlib.writePlistToString(data).encode('utf-8')
-        message = struct.pack('>i', len(payload)) + payload
-        self._socket.sendall(message)
+    def recv(self, length):
+        data = ctypes.create_string_buffer(length)
+        try:
+            received = AMDServiceConnectionReceive(self._service_connection, data, ctypes.c_uint32(length))
+            return data.raw[:received]
+        except Exception as e:
+            print(e)
 
-        header = self._socket.recv(4)
-        size = struct.unpack('>i', header)[0]
-        payload = self._socket.recv(size)
-        return plistlib.readPlistFromString(payload)
+class SecurePlistService(SecureService):
+
+    def build_plist(self, d, endianity='>', fmt=plistlib.FMT_XML):
+        payload = plistlib.dumps(d, fmt=fmt)
+        message = struct.pack(endianity + 'L', len(payload))
+        return message + payload
+
+    def send_plist(self, data, endianity='>', fmt=plistlib.FMT_XML):
+        plist = self.build_plist(data, endianity, fmt)
+        return self.sendall(plist)
+
+    def recv_prefixed(self, endianity='>'):
+        size = self.recv(4)
+        if not size or len(size) != 4:
+            return
+        size = struct.unpack(endianity + 'L', size)[0]
+        return self.recv(size)
+
+    def recv_plist(self, endianity='>'):
+        data = self.recv_prefixed(endianity=endianity)
+        return plistlib.loads(data)
 
 # Finally, the good stuff.
 
@@ -510,6 +840,7 @@ class MobileDeviceManager(object):
         self._device = None
         self._waitForDeviceId = None
         self._notification = None
+        self._last_status = None
 
         self._transferCallback = am_device_install_application_callback(self._transfer)
         self._installCallback = am_device_install_application_callback(self._install)
@@ -526,7 +857,7 @@ class MobileDeviceManager(object):
     def connect(self):
         e = AMDeviceConnect(self._device)
         if e != 0:
-            raise RuntimeError('AMDeviceConnect returned %d' % e)
+            raise MobileDeviceError(e)
 
         if not self.isPaired():
             self.pair()
@@ -535,12 +866,12 @@ class MobileDeviceManager(object):
     def disconnect(self):
         e = AMDeviceDisconnect(self._device)
         if e != 0:
-            raise RuntimeError('AMDeviceDisconnect returned %d' % e)
+            raise MobileDeviceError(e)
 
     def pair(self):
         e = AMDevicePair(self._device)
         if e != 0:
-            raise RuntimeError('AMDevicePair returned %d' % e)
+            raise MobileDeviceError(e)
 
     def isPaired(self):
         return AMDeviceIsPaired(self._device) != 0
@@ -548,17 +879,17 @@ class MobileDeviceManager(object):
     def validatePairing(self):
         e = AMDeviceValidatePairing(self._device)
         if e != 0:
-            raise RuntimeError('AMDeviceValidatePairing returned %d' % e)
+            raise MobileDeviceError(e)
 
     def startSession(self):
         e = AMDeviceStartSession(self._device)
         if e != 0:
-            raise RuntimeError('AMDeviceStartSession returned %d' % e)
+            raise MobileDeviceError(e)
 
     def stopSession(self):
         e = AMDeviceStopSession(self._device)
         if e != 0:
-            raise RuntimeError('AMDeviceStopSession returned %d' % e)
+            raise MobileDeviceError(e)
 
     def waitForDevice(self, timeout=0, device=None):
         self._waitForDeviceId = device
@@ -566,7 +897,7 @@ class MobileDeviceManager(object):
         self._notificationCallback = am_device_notification_callback(self._deviceNotification)
         e = AMDeviceNotificationSubscribe(self._notificationCallback, 0, 0, 0, ctypes.byref(self._notification))
         if e != 0:
-            raise RuntimeError('AMDeviceNotificationSubscribe returned %d' % e)
+            raise MobileDeviceError(e)
 
         if timeout > 0:
             timer = CFRunLoopTimerCreate(None, CFAbsoluteTimeGetCurrent() + timeout, 0, 0, 0, self._timerCallback, None)
@@ -597,80 +928,112 @@ class MobileDeviceManager(object):
     def deviceId(self):
         return CFStringGetStr(AMDeviceCopyDeviceIdentifier(self._device))
 
-    def mountImage(self, imagePath):
-        if sys.platform == 'win32':
-            imageMounterService = self.startService('com.apple.mobile.mobile_image_mounter')
-            try:
-                # AMDeviceMountImage isn't exported in MobileDevice.dll grumble grumble.
-                raw = RawPlistService(imageMounterService)
+    def listImages(self):
+        images = []
+        imageMounterService = self.startSecureService('com.apple.mobile.mobile_image_mounter')
+        try:
+            plistService = SecurePlistService(imageMounterService)
+            plistService.send_plist({'Command': 'CopyDevices'})
+            result = plistService.recv_plist()
+            if result.get('Status') == 'Complete':
+                images = result.get('EntryList', [])
+            plistService.send_plist({'Command': 'Hangup'})
+        finally:
+            self.stopSecureService(imageMounterService)
+        return images
 
-                result = raw.exchange({
-                    'Command': 'ReceiveBytes',
-                    'ImageSize': os.stat(imagePath).st_size,
-                    'ImageType': 'Developer',
-                    'ImageSignature': plistlib.Data(open(imagePath + '.signature', 'rb').read()),
-                })
-                if result.get('Status') == 'ReceiveBytesAck':
-                    # Only supported by iOS 7 and up?
-                    raw._socket.sendall(open(imagePath, 'rb').read())
+    def lookupImage(self, imageType):
+        signature = None
+        imageMounterService = self.startSecureService('com.apple.mobile.mobile_image_mounter')
+        try:
+            plistService = SecurePlistService(imageMounterService)
+            plistService.send_plist({
+                'Command': 'LookupImage',
+                'ImageType': imageType
+            })
+            result = plistService.recv_plist()
+            signature = result.get('ImageSignature', [])
+            if isinstance(signature, list):
+                if len(signature) > 0:
+                    signature = signature[0]
                 else:
-                    service = self.startService('com.apple.afc')
-                    try:
-                        afc = AFC(service)
-                        try:
-                            afc.mkdir('PublicStaging')
-                            target = afc.open('PublicStaging/staging.dimage', 'w')
-                            with open(imagePath, 'rb') as source:
-                                while True:
-                                    data = source.read(8192)
-                                    if data:
-                                        target.write(data)
-                                    else:
-                                        break
-                            target.close()
-                        finally:
-                            afc.close()
-                    finally:
-                        self.stopService(service)
+                    signature = None
 
-                result = raw.exchange({
-                    'Command': 'MountImage',
-                    'ImageType': 'Developer',
-                    'ImageSignature': plistlib.Data(open(imagePath + '.signature', 'rb').read()),
-                    'ImagePath': '/var/mobile/Media/PublicStaging/staging.dimage',
-                })
-                if 'Error' in result:
-                    print 'MountImage returned', result['Error']
-                if 'Status' in result:
-                    print 'MountImage =>', result['Status']
-            finally:
-                self.stopService(imageMounterService)
-        else:
-            self.connect()
-            try:
-                self.startSession()
+            plistService.send_plist({'Command': 'Hangup'})
+        finally:
+            self.stopSecureService(imageMounterService)
+        return signature
+
+    def isDeveloperImageMounted(self):
+        return self.lookupImage('Developer') is not None
+
+    def unmountImage(self):
+        images = self.listImages()
+        for image in images:
+            if image.get('DiskImageType', '')  == 'Developer':
+                imageSignature = image.get('ImageSignature', '')
+                mountPath = image.get('MountPath', '')
+                imageMounterService = self.startSecureService('com.apple.mobile.mobile_image_mounter')
                 try:
-                    signature = open(imagePath + '.signature', 'rb').read()
-                    signature = CFDataCreate(None, signature, len(signature))
-                    items = 2
-
-                    keys = (ctypes.c_void_p * items)(CFStr('ImageSignature'), CFStr('ImageType'))
-                    values = (ctypes.c_void_p * items)(signature, CFStr('Developer'))
-
-                    options = CFDictionaryCreate(None, keys, values, items, ctypes.byref(kCFTypeDictionaryKeyCallBacks), ctypes.byref(kCFTypeDictionaryValueCallBacks))
-                    self._mountCallback = am_device_mount_image_callback(self._mount)
-                    e = AMDeviceMountImage(self._device, CFStr(imagePath), options, self._mountCallback, None)
-                    if e == 0:
-                        return True
-                    elif e  == 0xe8000076:
-                        # already mounted
-                        return False
-                    else:
-                        raise RuntimeError('AMDeviceMountImage returned %d' % e)
+                    plistService = SecurePlistService(imageMounterService)
+                    plistService.send_plist({
+                        'Command': 'UnmountImage',
+                        'ImageType': 'Developer',
+                        'MountPath': mountPath,
+                        'ImageSignature': imageSignature
+                    })
+                    response = plistService.recv_plist()
+                    error = response.get('Error')
+                    if error:
+                        print("UnmountImage returned: {}".format(error))
+                    plistService.send_plist({'Command': 'Hangup'})
                 finally:
-                    self.stopSession()
-            finally:
-                self.disconnect()
+                    self.stopSecureService(imageMounterService)
+
+    def mountImage(self, imagePath):
+        imageSignature = Path(Path(imagePath).with_suffix('.dmg.signature')).read_bytes()
+        mountedSignature = self.lookupImage('Developer')
+        if mountedSignature == imageSignature:
+            print('MountImage => AlreadyMounted')
+            return
+
+        imageMounterService = self.startSecureService('com.apple.mobile.mobile_image_mounter')
+        try:
+            plistService = SecurePlistService(imageMounterService)
+
+            plistService.send_plist({
+                'Command': 'ReceiveBytes',
+                'ImageSize': os.stat(imagePath).st_size,
+                'ImageType': 'Developer',
+                'ImageSignature': imageSignature
+            })
+            result = plistService.recv_plist()
+
+            if result.get('Status') != 'ReceiveBytesAck':
+                raise RuntimeError('Expected "ReceiveBytesAck", got {}'.format(result))
+
+            # Send the image to the device
+            plistService.sendall(open(imagePath, 'rb').read())
+            result = plistService.recv_plist()
+            if result.get('Status') != 'Complete':
+                raise RuntimeError('Expected "Complete", got {}'.format(result))
+
+            # Mount the image
+            plistService.send_plist({
+                'Command': 'MountImage',
+                'ImageType': 'Developer',
+                'ImageSignature': imageSignature
+            })
+            result = plistService.recv_plist()
+            if 'Error' in result:
+                print('MountImage returned', result['Error'])
+            if 'Status' in result:
+                print('MountImage =>', result['Status'])
+
+            plistService.send_plist({'Command': 'Hangup'})
+
+        finally:
+            self.stopSecureService(imageMounterService)
 
     def startService(self, service):
         self.connect()
@@ -680,7 +1043,7 @@ class MobileDeviceManager(object):
                 fd = ctypes.c_int()
                 e = AMDeviceStartService(self._device, CFStr(service), ctypes.byref(fd), None)
                 if e != 0:
-                    raise RuntimeError('AMDeviceStartService returned %d' % e)
+                    raise MobileDeviceError(e)
                 return fd.value
             finally:
                 self.stopSession()
@@ -695,19 +1058,52 @@ class MobileDeviceManager(object):
                 fd = ctypes.c_int()
                 e = AMDeviceStartHouseArrestService(self._device, CFStr(bundleId), None, ctypes.byref(fd), None)
                 if e != 0:
-                    raise RuntimeError('AMDeviceStartHouseArrestService returned %d' % e)
+                    raise MobileDeviceError(e)
                 return fd.value
             finally:
                 self.stopSession()
         finally:
             self.disconnect()
 
+    def startSecureService(self, service):
+        self.connect()
+        try:
+            self.startSession()
+            try:
+                handle = ctypes.c_void_p()
+                e = AMDeviceSecureStartService(self._device, CFStr(service), None, ctypes.byref(handle))
+                if e != 0:
+                    raise MobileDeviceError(e)
+                return handle
+            finally:
+                self.stopSession()
+        finally:
+            self.disconnect()
+
+    def stopSecureService(self, handle):
+        if handle:
+            self.connect()
+            self.startSession()
+            AMDServiceConnectionInvalidate(handle)
+            self.stopSession()
+            self.disconnect()
+
+    def readPlist(self, path):
+        plist = {}
+        try:
+            f = open(path, 'rb')
+            plist = plistlib.load(f)
+            f.close()
+        except:
+            raise RuntimeError('Unable to load plist: {}'.format(path))
+        return plist
+
     def bundleId(self, path):
-        plist = plistlib.readPlist(os.path.join(path, 'Info.plist'))
+        plist = self.readPlist(os.path.join(path, 'Info.plist'))
         return plist['CFBundleIdentifier']
 
     def bundleExecutable(self, path):
-        plist = plistlib.readPlist(os.path.join(path, 'Info.plist'))
+        plist = self.readPlist(os.path.join(path, 'Info.plist'))
         return plist['CFBundleExecutable']
 
     def transferApplication(self, path):
@@ -715,7 +1111,7 @@ class MobileDeviceManager(object):
         try:
             e = AMDeviceTransferApplication(afc, CFStr(os.path.abspath(path)), None, self._transferCallback, None)
             if e != 0:
-                raise RuntimeError('AMDeviceTransferApplication returned %d' % e)
+                raise MobileDeviceError(e)
         finally:
             self.stopService(afc)
 
@@ -731,7 +1127,7 @@ class MobileDeviceManager(object):
 
             e = AMDeviceInstallApplication(afc, CFStr(path), options, self._installCallback, None)
             if e != 0:
-                raise RuntimeError('AMDeviceInstallApplication returned %d' % e)
+                raise MobileDeviceError(e)
         finally:
             mdm.stopService(afc)
 
@@ -740,7 +1136,7 @@ class MobileDeviceManager(object):
         try:
             e = AMDeviceUninstallApplication(afc, CFStr(bundleId), None, self._uninstallCallback, None)
             if e != 0:
-                raise RuntimeError('AMDeviceUninstallApplication returned %d' % e)
+                raise MobileDeviceError(e)
         finally:
             self.stopService(afc)
 
@@ -754,7 +1150,7 @@ class MobileDeviceManager(object):
                 dictionary = CFDictionaryRef()
                 e = AMDeviceLookupApplications(self._device, 0, ctypes.byref(dictionary))
                 if e != 0:
-                    raise RuntimeError('AMDeviceLookupApplications returned %d' % e)
+                    raise MobileDeviceError(e)
                 return CFDictionaryToDict(dictionary)
             finally:
                 self.stopSession()
@@ -775,13 +1171,13 @@ class MobileDeviceManager(object):
             os.close(fd)
 
     def showStatus(self, action, dictionary):
-        show = ['[%s]' % action]
+        show = ['[{}]'.format(action)]
 
         percentComplete = CFDictionaryGetValue(dictionary, CFStr('PercentComplete'))
         if percentComplete:
             percent = ctypes.c_int()
             CFNumberGetValue(percentComplete, kCFNumberSInt32Type, ctypes.byref(percent))
-            show.append(str.rjust('%d%%' % percent.value, 4))
+            show.append(str.rjust('{}%'.format(percent.value), 4))
 
         show.append(CFStringGetStr(CFDictionaryGetValue(dictionary, CFStr('Status'))))
 
@@ -789,14 +1185,14 @@ class MobileDeviceManager(object):
         if path:
             show.append(CFStringGetStr(path))
 
-        print ' '.join(show)
+        status = ' '.join(show)
+        if self._last_status != status:
+            print(status)
+            self._last_status = status
 
     def debugServer(self):
-        service = self.startService('com.apple.debugserver')
-        if sys.platform == 'win32':
-            return MockSocket(service)
-        else:
-            return socket.fromfd(service, socket.AF_INET, socket.SOCK_STREAM)
+        service = self.startSecureService('com.apple.debugserver.DVTSecureSocketProxy')
+        return service
 
     def _timer(self, timer, info):
         CFRunLoopStop(CFRunLoopGetCurrent())
@@ -924,7 +1320,11 @@ class DeviceSupportPaths(object):
 
     def deviceSupportDirectory(self):
         if not self._deviceSupportDirectory:
-            self._deviceSupportDirectory = subprocess.check_output(['xcode-select', '-print-path']).strip()
+            if sys.platform == 'win32':
+                here = os.path.normpath(os.path.abspath(os.path.dirname(__file__)))
+                self._deviceSupportDirectory = os.path.join(here, 'DeveloperDiskImage')
+            else:
+                self._deviceSupportDirectory = subprocess.check_output(['xcode-select', '-print-path']).decode('utf-8').strip()
         return self._deviceSupportDirectory
 
     def deviceSupportDirectoryForOsVersion(self):
@@ -953,7 +1353,10 @@ class DeviceSupportPaths(object):
 
     def developerDiskImagePath(self):
         if not self._developerDiskImagePath:
-            path = os.path.join(self.deviceSupportDirectory(), 'Platforms', self._target + '.platform', 'DeviceSupport')
+            if sys.platform == 'win32':
+                path = self.deviceSupportDirectory()
+            else:
+                path = os.path.join(self.deviceSupportDirectory(), 'Platforms', self._target + '.platform', 'DeviceSupport')
             attempts = [os.path.join(path, attempt, 'DeveloperDiskImage.dmg') for attempt in self.versionPermutations()]
             for attempt in attempts:
                 if os.path.exists(attempt):
@@ -966,12 +1369,14 @@ class DeviceSupportPaths(object):
 class DebuggerException(Exception):
     def __init__(self, value):
         self.value = value
+    def __repr__(self):
+        return '{}'.format(self.value)
     def __str__(self):
-        return str(self.value)
+        return '{}'.format(self.value)
 
 class GdbServer(object):
     """
-    Given a socket connected to a remote debugserver, this speaks just enough
+    Given a handle to the iOS remote debugserver service, this speaks just enough
     of the GDB Remote Serial Protocol
     <http://sourceware.org/gdb/onlinedocs/gdb/Remote-Protocol.html> to launch
     an application and display its output.
@@ -979,8 +1384,9 @@ class GdbServer(object):
     Usage:
         GdbServer(connectedSocket).run('/path/to/executable', 'arg1', 'arg2')
     """
-    def __init__(self, connectedSocket):
-        self._socket = connectedSocket
+    def __init__(self, serviceConnection):
+        self._connection = serviceConnection
+        self._service = SecureService(serviceConnection)
         self.exitCode = None
         self._readBuffer = ''
 
@@ -988,10 +1394,10 @@ class GdbServer(object):
         startIndex = self._readBuffer.find('$')
         endIndex = self._readBuffer.find('#', startIndex)
         while startIndex == -1 or endIndex == -1 or len(self._readBuffer) < endIndex + 3:
-            data = self._socket.recv(4096)
+            data = self._service.recv(4096)
             if not data:
                 break
-            self._readBuffer += data
+            self._readBuffer += data.decode('utf-8')
             startIndex = self._readBuffer.find('$')
             endIndex = self._readBuffer.find('#', startIndex)
 
@@ -1014,9 +1420,14 @@ class GdbServer(object):
 
         return payload
 
+    def _send(self, packet):
+        payload = '$%s#%02x' % (packet, sum(ord(c) for c in packet) & 255)
+        message = struct.pack('>L', len(payload)) + bytes(payload, 'utf-8')
+        self._service.sendall(message)
+
     def send(self, packet):
-        data = '$%s#%02x' % (packet, sum(ord(c) for c in packet) & 255)
-        self._socket.sendall(data)
+        self._send(packet)
+
         stopReply = [True for command in ['C', 'c', 'S', 's', 'vCont', 'vAttach', 'vRun', 'vStopped', '?'] if packet.startswith(command)]
 
         if stopReply:
@@ -1037,14 +1448,15 @@ class GdbServer(object):
                         raise DebuggerException(message)
                     elif response.startswith('W'):
                         self.exitCode = int(response[1:], 16)
-                        print 'Process returned %d.' % self.exitCode
+                        print('Process returned %d.' % self.exitCode)
                     elif response.startswith('X'):
                         signal = '0x' + response[1:3]
                         if ';' in response:
                             response = response.split(';', 1)[1]
                         raise DebuggerException('Process terminated with signal %s (%s).' % (signal, response))
                     elif response.startswith('O'):
-                        print response[1:].decode('hex'),
+                        log_output = binascii.unhexlify(bytes(response[1:],'utf-8')).decode('utf-8')
+                        print('{}'.format(log_output), end=' ')
                         resume = True
                     elif response.startswith('F'):
                         raise RuntimeError('GDB File-I/O Remote Protocol Unimplemented.')
@@ -1056,10 +1468,13 @@ class GdbServer(object):
 
     def run(self, *argv):
         self.send('QStartNoAckMode')
-        self._socket.sendall('+')
+        self._send('+')
         self.send('QEnvironmentHexEncoded:')
         self.send('QSetDisableASLR:1')
-        self.send('A' + ','.join('%d,%d,%s' % (len(arg) * 2, i, arg.encode('hex')) for i, arg in enumerate(argv)))
+        args_command = 'A'
+        for i,arg in enumerate(argv):
+            args_command += '{},{},{},'.format(len(arg) * 2, i, binascii.hexlify(bytes(arg, 'utf-8')).decode('utf-8'))
+        self.send(args_command)
         self.send('qLaunchSuccess')
         self.send('vCont;c')
 
@@ -1069,7 +1484,7 @@ if __name__ == '__main__':
     group = parser.add_argument_group('Global Configuration')
     group.add_argument('-b', '--bundle', help='path to local app bundle to operate on')
     group.add_argument('-id', '--appid', help='application identifier to operate on')
-    group.add_argument('-t', '--timeout', type=float, help='seconds to wait for slow operations before giving up')
+    group.add_argument('-t', '--timeout', type=int, help='seconds to wait for slow operations before giving up', default=0)
     group.add_argument('-dev', '--device-id', help='device id of specific device to communicate with')
 
     group = parser.add_argument_group('Application Management')
@@ -1099,60 +1514,60 @@ if __name__ == '__main__':
         and not arguments.get_file \
         and not arguments.put_file \
         and not arguments.list_files:
-        print 'Nothing to do.'
+        print('Nothing to do.')
         sys.exit(0)
 
     mdm = MobileDeviceManager()
     if arguments.device_id:
-        print 'Waiting for a device with UDID %s...' % arguments.device_id
+        print('Waiting for a device with UDID %s...' % arguments.device_id)
     else:
-        print 'Waiting for a device...'
+        print('Waiting for a device...')
     if not mdm.waitForDevice(timeout=arguments.timeout, device=arguments.device_id):
-        print 'Gave up waiting for a device.'
+        print('Gave up waiting for a device.')
         sys.exit(1)
 
-    print 'Connected to device with UDID:', mdm.deviceId()
+    print('Connected to device with UDID:', mdm.deviceId())
 
     if arguments.uninstall:
         bundle = arguments.appid or mdm.bundleId(arguments.bundle)
-        print '\nUninstalling %s...' % bundle
+        print('\nUninstalling %s...' % bundle)
         mdm.uninstallApplication(bundle)
 
     if arguments.install:
-        print '\nInstalling %s...' % arguments.bundle
+        print('\nInstalling %s...' % arguments.bundle)
         mdm.transferApplication(arguments.bundle)
         mdm.installApplication(arguments.bundle)
 
     if arguments.list_applications:
-        print '\nInstalled applications:'
+        print('\nInstalled applications:')
         applications = mdm.lookupApplications()
-        bundleIdentifiers = applications.keys()
+        bundleIdentifiers = list(applications.keys())
         bundleIdentifiers.sort()
         for bundleId in bundleIdentifiers:
-            print bundleId
+            print(bundleId)
 
     if arguments.mount:
         if arguments.developer_disk_image:
             ddi = arguments.developer_disk_image
         else:
             ddi = DeviceSupportPaths('iPhoneOS', mdm.productVersion(), mdm.buildVersion()).developerDiskImagePath()
-        print '\nMounting %s...' % ddi
+        print('\nMounting %s...' % ddi)
         mdm.mountImage(ddi)
 
     if arguments.run:
         executable = mdm.lookupApplicationExecutable(arguments.appid or mdm.bundleId(arguments.bundle))
         db = mdm.debugServer()
-        if arguments.timeout > 0:
-            db.settimeout(arguments.timeout)
+        #if arguments.timeout > 0:
+        #    db.settimeout(arguments.timeout)
         debugger = GdbServer(db)
         argv = [executable]
         if arguments.arguments:
             argv += arguments.arguments
-        print '\nRunning %s...' % ' '.join(argv)
+        print('\nRunning %s...' % ' '.join(argv))
         try:
             debugger.run(*argv)
-        except DebuggerException, e:
-            print e
+        except DebuggerException as e:
+            print(e)
             sys.exit(1)
         sys.exit(debugger.exitCode)
 
@@ -1160,7 +1575,7 @@ if __name__ == '__main__':
         if arguments.appid or arguments.bundle:
             afc = AFC(mdm.startHouseArrestService(arguments.appid or mdm.bundleId(arguments.bundle)))
         else:
-            afc = AFC(mdm.startService('com.apple.afc'))
+            afc = AFC(mdm.startService(u'com.apple.afc'))
 
         if arguments.get_file:
             readFile = afc.open(arguments.get_file[0], 'r')
@@ -1174,7 +1589,7 @@ if __name__ == '__main__':
                 size += len(data)
             writeFile.close()
             readFile.close()
-            print '%d bytes read from %s.' % (size, arguments.get_file[0])
+            print('%d bytes read from %s.' % (size, arguments.get_file[0]))
         elif arguments.put_file:
             readFile = open(arguments.put_file[0], 'rb')
             writeFile = afc.open(arguments.put_file[1], 'w')
@@ -1187,11 +1602,11 @@ if __name__ == '__main__':
                 size += len(data)
             writeFile.close()
             readFile.close()
-            print '%d bytes written to %s.' % (size, arguments.put_file[1])
+            print('%d bytes written to %s.' % (size, arguments.put_file[1]))
         elif arguments.list_files:
-            print 'Listing %s:' % arguments.list_files
+            print('Listing %s:' % arguments.list_files)
             def walk(root, indent=0):
-                print '  ' * indent + root
+                print('  ' * indent + root)
                 try:
                     children = afc.listdir(root)
                 except:
@@ -1202,3 +1617,4 @@ if __name__ == '__main__':
         afc.close()
 
     mdm.close()
+
